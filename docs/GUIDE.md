@@ -306,7 +306,8 @@ az deployment group create -g "$RESOURCE_GROUP" -f infra/patch-alerts.bicep -p w
 
 Delete the alert rules and their role assignments, the alert-scope workspace the alert template created,
 the Event Grid system topics, the Automation account
-and its role assignments, the maintenance configurations (their dynamic scopes go with them), the policy
+and its role assignments, the maintenance configurations (their dynamic scopes and static assignments are removed with them
+within about a minute), the policy
 assignments and their role assignments, then the snapshots the pre-event created. Role assignments
 outlive the managed identities they were granted to, so remove them explicitly
 (`az role assignment list --scope <resource-group-id>` shows them). Then delete the hook operator custom
