@@ -2,7 +2,9 @@
 
 This guide builds a complete, policy-driven patching setup for Linux Azure VMs and explains each
 decision. The steps were run in a live lab; the [live-test record](LIVE-TEST-2026-10-19.md) shows what
-each one did and what was not exercised (Azure Arc and a disk rollback). The commands use only
+each one did and what was not exercised: Azure Arc, a disk rollback, a freeze set through `frozenRings`
+(the lab froze a separately tagged configuration) and the remediation branch of the onboarding script
+(its rerun found nothing to remediate). The commands use only
 resource-group scope, so they are safe to try in a subscription that also hosts other workloads.
 
 ```text
@@ -37,7 +39,9 @@ Resource Graph ──▶ reporting queries, log-search alerts ◀── every ru
   `Microsoft.GuestConfiguration`, `Microsoft.PolicyInsights`, `Microsoft.Automation`.
 - Roles on the target resource group: Owner, or Contributor plus User Access Administrator (policy
   assignments create managed identities and role assignments). For people who only manage schedules,
-  the built-in **Scheduled Patching Contributor** role is the least-privilege choice.
+  start from the built-in **Scheduled Patching Contributor** role; it covers maintenance configurations
+  and their assignments but not template deployments, so deploying the ring template (including a freeze
+  or a hold) also needs `Microsoft.Resources/deployments/*` on the group.
 - A supported image. Update Manager supports Ubuntu, Debian, RHEL, Oracle Linux, AlmaLinux, Rocky Linux,
   SUSE and Azure Linux marketplace images; check the
   [support matrix](https://learn.microsoft.com/azure/update-manager/support-matrix-updates) for your
@@ -87,10 +91,11 @@ Assign Microsoft's built-in policies at the resource group so new VMs are onboar
 | `9905ca54-1471-49c6-8291-7582c04cd4d4` Set prerequisite for scheduling recurring updates on Azure VMs | DeployIfNotExists | `operatingSystemTypes=["Linux"]` |
 | `bd876905-5b84-4f73-ab2d-2e7a7c4568d9` Machines should be configured to periodically check for missing system updates | Audit | — |
 
-[`scripts/onboard-policy.sh`](../scripts/onboard-policy.sh) creates the three assignments with their
-managed identities (Contributor on the resource group), waits until each assignment's fresh compliance
-records stop growing, remediates existing VMs, and then checks every VM a policy reported noncompliant.
-It fails unless each remediation deployed something and those VMs are onboarded:
+[`scripts/onboard-policy.sh`](../scripts/onboard-policy.sh) creates the three assignments (the two
+remediating ones with managed identities that hold Contributor on the resource group), waits until those
+two assignments' fresh compliance records stop growing, remediates existing VMs, and then checks every VM
+they reported noncompliant. It fails unless each remediation deployed something and those VMs are
+onboarded:
 
 ```bash
 SUBSCRIPTION_ID="$SUBSCRIPTION_ID" RESOURCE_GROUP="$RESOURCE_GROUP" LOCATION="$LOCATION" scripts/onboard-policy.sh
@@ -101,8 +106,9 @@ What to expect:
 - The first compliance results take a few minutes to about twenty. A remediation in the default
   `ExistingNonCompliant` mode only acts on existing noncompliant records, so the script waits for them.
 - The built-in policies only match the image publishers and offers on their allow-lists. In the lab,
-  Azure Linux 3 was reported **Compliant without being changed**, because it is outside those lists even
-  though Update Manager supports it. Onboard such VMs directly:
+  the periodic-assessment and audit policies reported Azure Linux 3 **Compliant without changing it**, and
+  the prerequisite policy did not evaluate it at all, because it is outside those lists even though Update
+  Manager supports it. Onboard such VMs directly:
 
   ```bash
   scripts/set-customer-managed-schedules.sh "$RESOURCE_GROUP" <vm-name>
@@ -118,7 +124,8 @@ What to expect:
 A maintenance configuration (scope `InGuestPatch`) is a schedule plus patch settings. A dynamic scope
 attaches machines to it at run time by resource type, OS, region and tag, so moving a VM between rings
 is just a tag change. Use one configuration per ring with non-overlapping windows: every machine in a
-configuration starts patching at the same time.
+configuration starts patching at the same time (VMs in one availability set are patched one update
+domain at a time).
 
 [`infra/linux-patch-rings.bicep`](../infra/linux-patch-rings.bicep) creates two rings and their
 resource-group-level dynamic scopes:
@@ -156,7 +163,8 @@ which ones the lab exercised):
   per-update classification: `Critical`/`Security` installs every available update and `Other` installs
   nothing. Package holds still apply. This comes from the Linux patch extension's TDNF handling
   ([Azure/LinuxPatchExtension](https://github.com/Azure/LinuxPatchExtension)), not from the product
-  documentation.
+  documentation. In the lab every Azure Linux update was assessed as Security, and ring 1 (Critical and
+  Security) installed all of them except the held kernel.
 - **Package masks** use shell wildcards; an exclusion drops every version of the package.
 - **API versions:** `Microsoft.Maintenance/maintenanceConfigurations@2023-04-01` (GA). Resource-group
   dynamic scopes use `Microsoft.Maintenance/configurationAssignments@2023-04-01` deployed into the
@@ -186,7 +194,8 @@ require, and which also lets the identity export an unattached or deallocated di
 cancel a run (`Microsoft.Maintenance/applyUpdates/write`, which no built-in patching role grants;
 Microsoft's own sample uses Contributor). Webhooks belong to the Automation account, so name every
 configuration wired to it in `MAINTENANCE_CONFIGURATIONS`; when the webhooks are recreated the script
-also re-points any other maintenance topic in the group that used them. Rerun the script at any time: it
+also re-points every other maintenance-configuration topic in the group that has a `pre-to-runbook`
+subscription, so use one hook Automation account per resource group. Rerun the script at any time: it
 recreates webhooks that are missing, disabled, replaced from another machine or close to expiry, and
 re-points the event subscriptions.
 
@@ -267,8 +276,8 @@ az deployment group create -g "$RESOURCE_GROUP" -f infra/patch-alerts.bicep -p w
 |---|---|
 | Move a VM between rings | Change its `PatchRing` tag at least 15 minutes (40 with a pre-event) before the next window |
 | Exclude a VM | Remove its `PatchRing` tag; dynamic scopes drop it at the next run |
-| Change freeze | Redeploy the ring template with `frozenRings='["ring1"]'` (any subset). A redeploy updates every ring in the template, so finish it at least 40 minutes before the next window of **any** ring (check `scripts/report.sh schedule-runs`); the configuration gets `ChangeFreeze=true` and the pre-event handler cancels its runs until you redeploy without it. A tag added by hand works too, but the next template deployment removes it |
-| Hold a package | Add it to `packageNameMasksToExclude` of the ring that should not receive it and redeploy with the same 40-minute margin (keep `frozenRings` as it is) |
+| Change freeze | Redeploy the ring template with `frozenRings='["ring1"]'` (any subset). A redeploy updates every ring in the template, so finish it at least 40 minutes before the next window of **any** ring. Work that window out from each configuration's `startDateTime` and `recurEvery`: `scripts/report.sh schedule-runs` lists a run only once its record appears, about 40 minutes before the window; the configuration gets `ChangeFreeze=true` and the pre-event handler cancels its runs until you redeploy without it. A tag added by hand works too, but the next template deployment removes it |
+| Hold a package | Add it to `packageNameMasksToExclude` of the ring that should not receive it and redeploy with the same 40-minute margin (keep `frozenRings` as it is). A held Critical or Security package stays pending, so the pending-updates alert stays open for those machines until the hold is lifted and the package installed |
 | Roll back a bad update | Stop the VM, create a disk from the run's `snap-prepatch-<vm>-<yyyyMMddHHmmss>` snapshot (named after the run) and swap the OS disk (the lab created the snapshots but did not exercise a rollback) |
 | Investigate a run | `scripts/report.sh schedule-runs install-runs package-results`, the Automation job output of both hooks, and Update Manager → History in the portal |
 | Hybrid servers | Onboard on-premises Linux servers to Azure Arc. They need no patch-orchestration prerequisite and use their own periodic-assessment built-in (`bfea026e-043f-4ff4-9d1b-bf301ca7ff46`). To patch them in these rings, add `Microsoft.HybridCompute/machines` to the dynamic scopes' resource types; the hooks (start, snapshot and the post-event report) cover Azure VMs only. Arc-enabled servers are billed per server unless an entitlement covers them. Not exercised in the lab |
@@ -295,7 +304,8 @@ az deployment group create -g "$RESOURCE_GROUP" -f infra/patch-alerts.bicep -p w
 
 ## 10. Clean up
 
-Delete the alert rules and their role assignments, the Event Grid system topics, the Automation account
+Delete the alert rules and their role assignments, the alert-scope workspace the alert template created,
+the Event Grid system topics, the Automation account
 and its role assignments, the maintenance configurations (their dynamic scopes go with them), the policy
 assignments and their role assignments, then the snapshots the pre-event created. Role assignments
 outlive the managed identities they were granted to, so remove them explicitly
