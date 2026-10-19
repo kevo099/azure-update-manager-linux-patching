@@ -1,0 +1,12 @@
+// Per-package outcome of each installation in the last 7 days (packages a run did not select are left out).
+// 'installation' matches the installation column of install-runs.
+patchinstallationresources
+| where type has 'softwarepatches'
+| where resourceGroup =~ '{RESOURCE_GROUP}'
+| where todatetime(properties.lastModifiedDateTime) > ago(7d)
+| where tostring(properties.installationState) !~ 'NotSelected'
+| project machine = tostring(split(id, '/')[8]), installation = tostring(split(id, '/')[10]),
+          modified = todatetime(properties.lastModifiedDateTime), package = tostring(properties.patchName),
+          version = tostring(properties.version), classification = tostring(properties.classifications[0]),
+          state = tostring(properties.installationState)
+| order by machine asc, modified desc, package asc

@@ -1,0 +1,7 @@
+// Static (per-machine) configuration assignments. Resource-group dynamic scopes are read with
+// az maintenance assignment show-resource-group or a REST GET on the assignment.
+maintenanceresources
+| where type =~ 'microsoft.maintenance/configurationassignments'
+| where id has '/resourcegroups/{RESOURCE_GROUP}/'
+| project assignment = name, schedule = tostring(split(tostring(properties.maintenanceConfigurationId), '/')[8]),
+          target = tostring(split(tostring(properties.resourceId), '/')[8])

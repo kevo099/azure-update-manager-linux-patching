@@ -1,0 +1,12 @@
+// Per-machine installation runs (kept 30 days): scheduled (Platform) and on-demand (User).
+// 'run' is the schedule run (its yyyyMMddHHmmss name) for scheduled installs, empty for on-demand ones.
+patchinstallationresources
+| where type !has 'softwarepatches'
+| where resourceGroup =~ '{RESOURCE_GROUP}'
+| extend p = properties
+| project machine = tostring(split(id, '/')[8]), installation = name, start = todatetime(p.startDateTime),
+          status = tostring(p.status), startedBy = tostring(p.startedBy), run = tostring(split(tostring(p.maintenanceRunId), '/')[-1]),
+          installed = toint(p.installedPatchCount), failed = toint(p.failedPatchCount),
+          excluded = toint(p.excludedPatchCount), notSelected = toint(p.notSelectedPatchCount),
+          pending = toint(p.pendingPatchCount), reboot = tostring(p.rebootStatus), windowExceeded = tostring(p.maintenanceWindowExceeded)
+| order by start desc

@@ -1,0 +1,7 @@
+// One record per scheduled run of a maintenance configuration; the record ID is the run's correlation ID.
+maintenanceresources
+| where type =~ 'microsoft.maintenance/maintenanceconfigurations/applyupdates'
+| where id has '/resourcegroups/{RESOURCE_GROUP}/'
+| project schedule = tostring(split(id, '/')[8]), run = name, status = tostring(properties.status),
+          start = todatetime(properties.startDateTime), end = todatetime(properties.endDateTime)
+| order by start desc

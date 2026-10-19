@@ -1,0 +1,11 @@
+// Latest assessment per machine: pending updates by classification (assessments are kept 7 days).
+patchassessmentresources
+| where type !has 'softwarepatches'
+| where resourceGroup =~ '{RESOURCE_GROUP}'
+| extend p = properties
+| project machine = tostring(split(id, '/')[8]), os = tostring(p.osType), status = tostring(p.status),
+          assessed = todatetime(p.lastModifiedDateTime), startedBy = tostring(p.startedBy),
+          security = toint(p.availablePatchCountByClassification.security),
+          critical = toint(p.availablePatchCountByClassification.critical),
+          other = toint(p.availablePatchCountByClassification.other), rebootPending = tostring(p.rebootPending)
+| order by machine asc
