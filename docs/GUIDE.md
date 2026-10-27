@@ -4,8 +4,9 @@ This guide builds a complete, policy-driven patching setup for Linux Azure VMs a
 decision. The steps were run in a live lab; the [live-test record](LIVE-TEST-2026-10-19.md) shows what
 each one did and what was not exercised: Azure Arc, a disk rollback, a freeze set through `frozenRings`
 (the lab froze a separately tagged configuration) and the remediation branch of the onboarding script
-(its rerun found nothing to remediate). The commands use only
-resource-group scope, so they are safe to try in a subscription that also hosts other workloads.
+(its rerun found nothing to remediate). Examples target one resource group, where policy assignments
+and ring tags determine which VMs change. Use a dedicated test group for a rehearsal; sharing a
+subscription does not isolate other VMs inside that group from these policies or schedules.
 
 ```text
 Azure Policy (resource group)          Maintenance configurations             Event Grid + Automation
@@ -47,7 +48,8 @@ Resource Graph ──▶ reporting queries, log-search alerts ◀── every ru
   [support matrix](https://learn.microsoft.com/azure/update-manager/support-matrix-updates) for your
   exact offer and plan. The lab used Ubuntu 24.04, Debian 12, RHEL 9 (pay-as-you-go) and Azure Linux 3.
 
-Set the values used throughout:
+Clone this repository and run the examples from its root; paths such as `scripts/onboard-policy.sh`
+and `infra/linux-patch-rings.bicep` are relative to that directory. Set the values used throughout:
 
 ```bash
 SUBSCRIPTION_ID='<subscription-id>'
@@ -180,10 +182,16 @@ maintenance configuration. The lab sends both to Azure Automation runbooks throu
   region), starts any that are stopped and leaves them running, and takes an incremental snapshot of each
   OS disk named after the run and tagged to expire after three days. A repeated delivery reuses the
   snapshots; an event that arrives after the window started changes nothing and fails the job. If the
-  configuration has the tag `ChangeFreeze=true`, it **cancels the run** instead.
+  configuration has the tag `ChangeFreeze=true`, it **requests cancellation** instead.
 - [`runbooks/AUM-PostMaintenance.ps1`](../runbooks/AUM-PostMaintenance.ps1) reports, for each machine in
   the run, the run status and the installation it recorded for that run, then deletes pre-patch snapshots
   whose expiry has passed. The report is written before cleanup.
+
+For change freeze, the handler sets its `cancelled` summary flag after submitting
+the request, then polls Resource Graph for up to two minutes. An unconfirmed
+result does not itself fail that job. Check the actual run's provider-reported
+status using its correlation/run ID; `cancelled=true` or a successful webhook
+job alone is not proof that patching was prevented before the cutoff.
 
 [`scripts/deploy-hooks.sh`](../scripts/deploy-hooks.sh) creates the Automation account (system identity,
 PowerShell runtime environment), publishes both runbooks byte-for-byte, creates the webhooks, grants the
@@ -204,6 +212,14 @@ SUBSCRIPTION_ID="$SUBSCRIPTION_ID" RESOURCE_GROUP="$RESOURCE_GROUP" LOCATION="$L
 AUTOMATION_ACCOUNT=aa-patch-hooks MAINTENANCE_CONFIGURATIONS="mc-linux-ring0-canary mc-linux-ring1-prod" \
   scripts/deploy-hooks.sh
 ```
+
+Treat the pre-event and patch installation as separate results. The supplied runbook records snapshot
+errors and fails its Automation job; it only calls the cancellation API in its `ChangeFreeze=true`
+branch. A failed snapshot therefore does not stop the scheduled patch installation. Before the
+cancellation cut-off, inspect the pre-event job and require each expected snapshot to be `Succeeded`;
+if patching must not proceed, explicitly cancel that run. A successful maintenance-run status covers
+update installation, not either hook. See Microsoft's
+[execution-order guidance](https://learn.microsoft.com/azure/update-manager/pre-post-scripts-overview#schedule-execution-order-with-pre-and-post-events).
 
 Timing and design notes:
 
@@ -276,7 +292,7 @@ az deployment group create -g "$RESOURCE_GROUP" -f infra/patch-alerts.bicep -p w
 |---|---|
 | Move a VM between rings | Change its `PatchRing` tag at least 15 minutes (40 with a pre-event) before the next window |
 | Exclude a VM | Remove its `PatchRing` tag; dynamic scopes drop it at the next run |
-| Change freeze | Redeploy the ring template with `frozenRings='["ring1"]'` (any subset). A redeploy updates every ring in the template, so finish it at least 40 minutes before the next window of **any** ring. Work that window out from each configuration's `startDateTime` and `recurEvery`: `scripts/report.sh schedule-runs` lists a run only once its record appears, about 40 minutes before the window; the configuration gets `ChangeFreeze=true` and the pre-event handler cancels its runs until you redeploy without it. A tag added by hand works too, but the next template deployment removes it |
+| Change freeze | Redeploy the ring template with `frozenRings='["ring1"]'` (any subset). A redeploy updates every ring in the template, so finish it at least 40 minutes before the next window of **any** ring. Work that window out from each configuration's `startDateTime` and `recurEvery`: `scripts/report.sh schedule-runs` lists a run only once its record appears, about 40 minutes before the window; the configuration gets `ChangeFreeze=true` and the pre-event handler requests cancellation of its runs until you redeploy without it. Confirm the actual run status rather than relying only on the handler summary. A tag added by hand works too, but the next template deployment removes it |
 | Hold a package | Add it to `packageNameMasksToExclude` of the ring that should not receive it and redeploy with the same 40-minute margin (keep `frozenRings` as it is). A held Critical or Security package stays pending, so the pending-updates alert stays open for those machines until the hold is lifted and the package installed |
 | Roll back a bad update | Stop the VM, create a disk from the run's `snap-prepatch-<vm>-<yyyyMMddHHmmss>` snapshot (named after the run) and swap the OS disk (the lab created the snapshots but did not exercise a rollback) |
 | Investigate a run | `scripts/report.sh schedule-runs install-runs package-results`, the Automation job output of both hooks, and Update Manager → History in the portal |

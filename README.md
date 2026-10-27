@@ -33,9 +33,11 @@ what each part did in a real subscription.
   the lists (Azure Linux 3 in the lab) are onboarded directly and checked with the reporting queries.
 - **Rings are schedules plus tags.** Each ring is a maintenance configuration with its own window,
   classifications, package holds and reboot setting; a dynamic scope picks machines by tag at run time.
-- **Scheduled runs are snapshotted and can be cancelled before they start.** The pre-event handler
-  snapshots OS disks and, during a change freeze, cancels the run before Microsoft's cut-off (10 minutes
-  before the window); the post-event handler reports each machine's outcome.
+- **Pre-events snapshot OS disks and can cancel a run before it starts.** During a change freeze,
+  the handler requests cancellation before Microsoft's cut-off (10 minutes before the window); the
+  post-event handler reports each machine's outcome. A snapshot failure fails the Automation job but
+  does not itself cancel patching. Check the hook job and snapshot results separately from the patch
+  result; [the guide explains the timing and failure boundary](docs/GUIDE.md#5-pre--and-post-maintenance-hooks).
 - **Urgent fixes do not wait for the window.** One-time installs select packages by name masks (for
   example `openssl*`), without a classification.
 - **Evidence comes from Resource Graph.** The report script and the alert rules both read Update
